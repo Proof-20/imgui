@@ -19764,8 +19764,12 @@ static void ImGui::DockNodeCalcTabBarLayout(const ImGuiDockNode* node, ImRect* o
     r.Max.x -= style.WindowBorderSize;
 
     float button_sz = g.FontSize;
-    r.Min.x += style.FramePadding.x;
+
+    if (node->HasWindowMenuButton && style.WindowMenuButtonPosition == ImGuiDir_Left)
+        r.Min.x += style.FramePadding.x;
+
     r.Max.x -= style.FramePadding.x;
+
     ImVec2 window_menu_button_pos = ImVec2(r.Min.x, r.Min.y + style.FramePadding.y);
     if (node->HasCloseButton)
     {
@@ -20364,7 +20368,7 @@ void ImGui::DockNodeTreeUpdateSplitter(ImGuiDockNode* node)
             float cur_size_1 = child_1->Size[axis];
             float min_size_0 = resize_limits[0] - child_0->Pos[axis];
             float min_size_1 = child_1->Pos[axis] + child_1->Size[axis] - resize_limits[1];
-            ImU32 bg_col = GetColorU32(ImGuiCol_WindowBg);
+            ImU32 bg_col = GetColorU32(ImGuiCol_ChildBg);
             if (SplitterBehavior(bb, GetID("##Splitter"), axis, &cur_size_0, &cur_size_1, min_size_0, min_size_1, g.WindowsBorderHoverPadding, WINDOWS_RESIZE_FROM_EDGES_FEEDBACK_TIMER, bg_col))
             {
                 if (touching_nodes[0].Size > 0 && touching_nodes[1].Size > 0)
