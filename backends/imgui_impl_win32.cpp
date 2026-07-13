@@ -140,6 +140,7 @@ struct ImGui_ImplWin32_Data
     UINT32                      KeyboardCodePage;
     bool                        WantUpdateMonitors;
     bool                        IsPerMonitorDpiAwareV2;
+    bool                        OwnsPlatformInterface;
     PFN_AdjustWindowRectExForDpi AdjustWindowRectExForDpi;
 
 #ifndef IMGUI_IMPL_WIN32_DISABLE_GAMEPAD
@@ -178,7 +179,7 @@ static void ImGui_ImplWin32_UpdateKeyboardCodePage(ImGuiIO& io)
         bd->KeyboardCodePage = CP_ACP; // Fallback to default ANSI code page when fails.
 }
 
-static bool ImGui_ImplWin32_InitEx(void* hwnd, bool platform_has_own_dc)
+static bool ImGui_ImplWin32_InitEx(void* hwnd, bool platform_has_own_dc, bool install_platform_interface)
 {
     ImGuiIO& io = ImGui::GetIO();
     IMGUI_CHECKVERSION();
@@ -194,16 +195,22 @@ static bool ImGui_ImplWin32_InitEx(void* hwnd, bool platform_has_own_dc)
     ImGui_ImplWin32_Data* bd = IM_NEW(ImGui_ImplWin32_Data)();
     io.BackendPlatformUserData = (void*)bd;
     io.BackendPlatformName = "imgui_impl_win32";
+
     io.BackendFlags |= ImGuiBackendFlags_HasMouseCursors;         // We can honor GetMouseCursor() values (optional)
     io.BackendFlags |= ImGuiBackendFlags_HasSetMousePos;          // We can honor io.WantSetMousePos requests (optional, rarely used)
-    io.BackendFlags |= ImGuiBackendFlags_PlatformHasViewports;    // We can create multi-viewports on the Platform side (optional)
     io.BackendFlags |= ImGuiBackendFlags_HasMouseHoveredViewport; // We can call io.AddMouseViewportEvent() with correct data (optional)
-    io.BackendFlags |= ImGuiBackendFlags_HasParentViewport;       // We can honor viewport->ParentViewportId by applying the corresponding parent/child relationship at platform levle (optional)
+
+    if (install_platform_interface)
+    {
+        io.BackendFlags |= ImGuiBackendFlags_PlatformHasViewports;    // We can create multi-viewports on the Platform side (optional)
+        io.BackendFlags |= ImGuiBackendFlags_HasParentViewport;       // We can honor viewport->ParentViewportId by applying the corresponding parent/child relationship at platform levle (optional)
+    }
 
     bd->hWnd = (HWND)hwnd;
     bd->TicksPerSecond = perf_frequency;
     bd->Time = perf_counter;
     bd->LastMouseCursor = ImGuiMouseCursor_COUNT;
+    bd->OwnsPlatformInterface = install_platform_interface;
     ImGui_ImplWin32_UpdateKeyboardCodePage(io);
 
     // Update monitor a first time during init
@@ -216,7 +223,9 @@ static bool ImGui_ImplWin32_InitEx(void* hwnd, bool platform_has_own_dc)
     // Be aware that GetPropA()/SetPropA() may be accessed from other processes.
     // So as we store a pointer in IMGUI_CONTEXT we need to make sure we only call GetPropA() on windows owned by our process.
     ::SetPropA(bd->hWnd, "IMGUI_CONTEXT", ImGui::GetCurrentContext());
-    ImGui_ImplWin32_InitMultiViewportSupport(platform_has_own_dc);
+
+    if (install_platform_interface)
+        ImGui_ImplWin32_InitMultiViewportSupport(platform_has_own_dc);
 
     if (HINSTANCE user32_dll = ::GetModuleHandleA("user32.dll"))
         bd->AdjustWindowRectExForDpi = (PFN_AdjustWindowRectExForDpi)::GetProcAddress(user32_dll, "AdjustWindowRectExForDpi");
@@ -246,15 +255,19 @@ static bool ImGui_ImplWin32_InitEx(void* hwnd, bool platform_has_own_dc)
     return true;
 }
 
-IMGUI_IMPL_API bool     ImGui_ImplWin32_Init(void* hwnd)
+IMGUI_IMPL_API bool ImGui_ImplWin32_Init(void* hwnd)
 {
-    return ImGui_ImplWin32_InitEx(hwnd, false);
+    return ImGui_ImplWin32_InitEx(hwnd, false, true);
 }
 
-IMGUI_IMPL_API bool     ImGui_ImplWin32_InitForOpenGL(void* hwnd)
+IMGUI_IMPL_API bool ImGui_ImplWin32_InitInputOnly(void* hwnd)
 {
-    // OpenGL needs CS_OWNDC
-    return ImGui_ImplWin32_InitEx(hwnd, true);
+    return ImGui_ImplWin32_InitEx(hwnd, false, false);
+}
+
+IMGUI_IMPL_API bool ImGui_ImplWin32_InitForOpenGL(void* hwnd)
+{
+    return ImGui_ImplWin32_InitEx(hwnd, true, true);
 }
 
 void    ImGui_ImplWin32_Shutdown()
@@ -265,7 +278,9 @@ void    ImGui_ImplWin32_Shutdown()
     ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
 
     ::SetPropA(bd->hWnd, "IMGUI_CONTEXT", nullptr);
-    ImGui_ImplWin32_ShutdownMultiViewportSupport();
+
+    if (bd->OwnsPlatformInterface)
+        ImGui_ImplWin32_ShutdownMultiViewportSupport();
 
     // Unload XInput library
 #ifndef IMGUI_IMPL_WIN32_DISABLE_GAMEPAD
@@ -275,8 +290,22 @@ void    ImGui_ImplWin32_Shutdown()
 
     io.BackendPlatformName = nullptr;
     io.BackendPlatformUserData = nullptr;
-    io.BackendFlags &= ~(ImGuiBackendFlags_HasMouseCursors | ImGuiBackendFlags_HasSetMousePos | ImGuiBackendFlags_HasGamepad | ImGuiBackendFlags_PlatformHasViewports | ImGuiBackendFlags_HasMouseHoveredViewport | ImGuiBackendFlags_HasParentViewport);
-    platform_io.ClearPlatformHandlers();
+
+    io.BackendFlags &= ~(
+        ImGuiBackendFlags_HasMouseCursors |
+        ImGuiBackendFlags_HasSetMousePos |
+        ImGuiBackendFlags_HasGamepad |
+        ImGuiBackendFlags_HasMouseHoveredViewport);
+
+    if (bd->OwnsPlatformInterface)
+    {
+        io.BackendFlags &= ~(
+            ImGuiBackendFlags_PlatformHasViewports |
+            ImGuiBackendFlags_HasParentViewport);
+
+        platform_io.ClearPlatformHandlers();
+    }
+
     IM_DELETE(bd);
 }
 
@@ -915,7 +944,7 @@ IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandlerEx(HWND hwnd, UINT msg, WPA
     case WM_IME_COMPOSITION:
     {
         // Handling WM_IME_COMPOSITION ensure that WM_IME_CHAR value is correct even for MBCS apps.
-        // (see #9099, #3653 and https://stackoverflow.com/questions/77450354 topics) 
+        // (see #9099, #3653 and https://stackoverflow.com/questions/77450354 topics)
         LRESULT result = ::DefWindowProcW(hwnd, msg, wParam, lParam);
         return (lParam & GCS_RESULTSTR) ? 1 : result;
     }
