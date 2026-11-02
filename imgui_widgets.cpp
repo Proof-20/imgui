@@ -10968,5 +10968,147 @@ void ImGui::TabItemLabelAndCloseButton(ImDrawList* draw_list, const ImRect& bb, 
         *out_just_closed = close_button_pressed;
 }
 
+//-------------------------------------------------------------------------
+// [SECTION] Widgets: Reaver categories and options
+//-------------------------------------------------------------------------
+
+bool ImGui::BeginCategory(const char* name, const ImGuiCategoryConfig& config)
+{
+    ImGuiContext& g = *GImGui;
+    ImGuiWindow* window = GetCurrentWindow();
+
+    IM_ASSERT(name != NULL && name[0] != '\0');
+    IM_ASSERT(config.title_ratio > 0.0f && config.title_ratio < 1.0f);
+
+    ImGuiCategoryStackData scope{};
+    scope.Window = window;
+
+    PushID(name);
+
+    PushStyleVar(ImGuiStyleVar_FrameRounding, 0.0f);
+
+    const bool open = CollapsingHeader(name, config.default_open ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None);
+
+    PopStyleVar();
+
+    if (open)
+    {
+        // Adjacent cells contribute half of the requested spacing each.
+        PushStyleVar(ImGuiStyleVar_CellPadding,
+        ImVec2(g.Style.ItemSpacing.x * 0.5f, g.Style.ItemSpacing.y * 0.5f));
+
+        const ImGuiTableFlags flags = ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings | ImGuiTableFlags_NoPadOuterX;
+
+        if (BeginTable("##Options", 2, flags))
+        {
+            TableSetupColumn("Title", ImGuiTableColumnFlags_WidthStretch, config.title_ratio);
+            TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch, 1.0f - config.title_ratio);
+
+            scope.TableId = g.CurrentTable->ID;
+        }
+        else
+        {
+            PopStyleVar();
+        }
+    }
+
+    g.ReaverCategoryStack.push_back(scope);
+    return scope.TableId != 0;
+}
+
+void ImGui::EndCategory()
+{
+    ImGuiContext& g = *GImGui;
+
+    IM_ASSERT_USER_ERROR_RET(g.ReaverCategoryStack.Size > 0,
+        "EndCategory() requires a matching BeginCategory().");
+
+    const ImGuiCategoryStackData scope =
+        g.ReaverCategoryStack.back();
+
+    IM_ASSERT_USER_ERROR_RET(scope.Window == g.CurrentWindow,
+        "EndCategory() called in the wrong window.");
+
+    if (scope.TableId != 0)
+    {
+        IM_ASSERT_USER_ERROR_RET(g.CurrentTable != NULL && g.CurrentTable->ID == scope.TableId,
+            "Close nested table/category scopes before EndCategory().");
+
+        EndTable();
+        PopStyleVar();
+    }
+
+    PopID();
+    g.ReaverCategoryStack.pop_back();
+}
+
+ImGuiRowResult ImGui::CreateRow(const ImGuiRowDesc& row)
+{
+    ImGuiWindow* window = GetCurrentWindow();
+    if (window->SkipItems) return {};
+    IM_ASSERT_USER_ERROR_RETV(row.title != NULL, {}, "CreateRow() requires a title.");
+    const char* id = row.id != NULL ? row.id : row.title;
+    IM_ASSERT_USER_ERROR_RETV(id[0] != '\0', {}, "CreateRow() requires a non-empty ID.");
+
+    const ImVec2 pos = GetCursorScreenPos();
+    const float height = GetFrameHeight();
+    const ImU32 background = GetColorU32((window->DC.ReaverRowIndex++ & 1) ? ImGuiCol_TableRowBgAlt : ImGuiCol_TableRowBg);
+    window->DrawList->AddRectFilled(ImVec2(window->WorkRect.Min.x, pos.y), ImVec2(window->WorkRect.Max.x, pos.y + height), background);
+
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_FramePadding;
+    if (row.selected) flags |= ImGuiTreeNodeFlags_Selected;
+    if (row.leaf) flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+    const bool open = TreeNodeEx(id, flags, "%s%s%s", row.icon ? row.icon : "", row.icon && row.icon[0] ? "  " : "", row.title);
+    ImGuiRowResult result{ IsItemClicked(ImGuiMouseButton_Left) && !IsItemToggledOpen(), IsItemToggledOpen(), open, IsItemHovered() };
+    if (open && !row.leaf)
+    {
+        if (row.output.draw) row.output.draw(row.output.user_data);
+        TreePop();
+    }
+    return result;
+}
+
+bool ImGui::CreateOption(const ImGuiOptionDesc& option)
+{
+    ImGuiContext& g = *GImGui;
+
+    IM_ASSERT_USER_ERROR_RETV(g.ReaverCategoryStack.Size > 0, false,
+        "CreateOption() requires an expanded category.");
+
+    const ImGuiCategoryStackData scope =
+        g.ReaverCategoryStack.back();
+
+    IM_ASSERT_USER_ERROR_RETV(
+        scope.Window == g.CurrentWindow &&
+        scope.TableId != 0 &&
+        g.CurrentTable != NULL &&
+        g.CurrentTable->ID == scope.TableId,
+        false,
+        "CreateOption() must target the current category table.");
+
+    IM_ASSERT_USER_ERROR_RETV(option.title != NULL && option.output.draw != NULL, false,
+        "CreateOption() requires a title and an output callback.");
+
+    const char* id = option.id != NULL ? option.id : option.title;
+
+    IM_ASSERT_USER_ERROR_RETV(id[0] != '\0', false,
+        "Provide an explicit option ID when the title is empty.");
+
+    PushID(id);
+
+    TableNextRow();
+
+    TableSetColumnIndex(0);
+    AlignTextToFramePadding();
+    TextUnformatted(option.title);
+
+    TableSetColumnIndex(1);
+    SetNextItemWidth(-FLT_MIN);
+
+    const bool changed = option.output.draw(option.output.user_data);
+
+    PopID();
+    return changed;
+}
 
 #endif // #ifndef IMGUI_DISABLE

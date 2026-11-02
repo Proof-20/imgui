@@ -385,6 +385,126 @@ struct ImTextureRef
 };
 IM_MSVC_RUNTIME_CHECKS_RESTORE
 
+struct ImGuiPanelSizeConfig
+{
+    // Initial dimensions. Both zero preserve ImGui's default sizing.
+    float width = 0.0f;
+    float height = 0.0f;
+
+    // Zero minimum inherits the theme's minimum window size.
+    float min_width = 0.0f;
+    float min_height = 0.0f;
+    float max_width = FLT_MAX;
+    float max_height = FLT_MAX;
+};
+
+struct ImGuiPanelLayoutConfig
+{
+    // Negative values inherit the current theme.
+    float padding_x = -1.0f;
+    float padding_y = -1.0f;
+    float row_spacing = -1.0f;
+    float column_spacing = -1.0f;
+    float border_radius = -1.0f; // Negative inherits the theme; zero gives square corners.
+
+    // Optional initial position relative to the main viewport work area.
+    // Set both coordinates, or leave both at FLT_MAX for ImGui placement.
+    float initial_x = FLT_MAX;
+    float initial_y = FLT_MAX;
+};
+
+struct ImGuiPanelBehaviorConfig
+{
+    bool resizable = true;
+    bool movable = true;
+    bool collapsible = true;
+    bool closable = true;
+    bool maximizable = true;
+};
+
+enum ImGuiPanelAction
+{
+    ImGuiPanelAction_None,
+    ImGuiPanelAction_CreateWindow,
+    ImGuiPanelAction_ReturnToMainWindow,
+    ImGuiPanelAction_ReturnToFloating,
+};
+
+struct ImGuiPanelContextConfig
+{
+    bool enabled = true; // Show the title-bar window toggle.
+    bool detached = false;
+    bool can_create_window = false;
+
+    // Borrowed Host dockspace in the current ImGui context; zero means none.
+    ImGuiID dockspace_id = 0;
+};
+
+struct ImGuiPanelConfig
+{
+    ImGuiPanelSizeConfig size{};
+    ImGuiPanelLayoutConfig layout{};
+    ImGuiPanelBehaviorConfig behavior{};
+    ImGuiPanelContextConfig context{};
+};
+
+struct ImGuiCategoryConfig
+{
+    float title_ratio = 0.45f;
+    bool default_open = true;
+};
+
+// Non-owning callback. The callable must remain alive during CreateOption().
+// Inline lambdas passed directly to CreateOption() satisfy this requirement.
+struct ImGuiOptionOutput
+{
+    const void* user_data = NULL;
+    bool(*draw)(const void*) = NULL;
+
+    ImGuiOptionOutput() = default;
+
+    template<typename T>
+    ImGuiOptionOutput(const T& callback) : user_data(&callback), draw([](const void* data) -> bool
+    {
+        return (*static_cast<const T*>(data))();
+    }) {}
+};
+
+struct ImGuiOptionDesc
+{
+    const char* title = NULL;
+    const char* id = NULL; // Optional stable ID for repeated or changing titles.
+    ImGuiOptionOutput output{};
+};
+
+// Borrowed for the duration of CreateRow(); inline lambdas are supported.
+struct ImGuiRowOutput
+{
+    const void* user_data = NULL;
+    void (*draw)(const void*) = NULL;
+    ImGuiRowOutput() = default;
+    template<typename T>
+    ImGuiRowOutput(const T& callback) : user_data(&callback), draw([](const void* data) { (*static_cast<const T*>(data))(); }) {}
+};
+
+struct ImGuiRowDesc
+{
+    const char* title = NULL;
+    const char* icon = NULL;
+    ImGuiRowOutput output{};
+    const char* id = NULL; // Stable identity independent of the visible title.
+    bool selected = false;
+    bool leaf = false;
+};
+
+struct ImGuiRowResult
+{
+    bool clicked = false;
+    bool toggled = false;
+    bool open = false;
+    bool hovered = false;
+};
+
 //-----------------------------------------------------------------------------
 // [SECTION] Dear ImGui end-user API functions
 // (Note that ImGui:: being a namespace, you can add extra ImGui:: functions in your own separate file. Please don't modify imgui source files!)
@@ -441,6 +561,30 @@ namespace ImGui
     // - Note that the bottom of window stack always contains a window called "Debug".
     IMGUI_API bool          Begin(const char* name, bool* p_open = NULL, ImGuiWindowFlags flags = 0);
     IMGUI_API void          End();
+
+    // Submit once per frame, only while open.
+    // Always call EndPanel(), including when BeginPanel() returns false.
+    // Use "Title###stable_id" to separate display title from identity.
+    // Configuration is consumed during this call; no reference is retained.
+    IMGUI_API bool          BeginPanel(const char* name, bool* p_open = NULL, const ImGuiPanelConfig& config = {}, ImGuiWindowFlags flags = 0);
+
+    // Always call after BeginPanel(), including collapsed panels.
+    // Returns a presentation request; the caller executes the host transfer.
+    IMGUI_API ImGuiPanelAction EndPanel();
+    // Explicitly activate a previously submitted panel. Call inside a frame.
+    // Maximized panels rise within their host's maximized layer, below floating windows.
+    IMGUI_API bool          ActivatePanel(const char* name);
+
+    // Always pair with EndCategory(), including when this returns false.
+    // Use "Title###stable_id" for a category with a changing display title.
+    IMGUI_API bool          BeginCategory(const char* name, const ImGuiCategoryConfig& config = {});
+    IMGUI_API void          EndCategory();
+
+    // Call only inside an expanded category.
+    // Executes output immediately and returns its changed/clicked result.
+    // The callback must balance any ImGui scopes it opens.
+    IMGUI_API bool          CreateOption(const ImGuiOptionDesc& option);
+    IMGUI_API ImGuiRowResult CreateRow(const ImGuiRowDesc& row);
 
     // Child Windows
     // - Use child windows to begin into a self-contained independent scrolling/clipping regions within a host window. Child windows can embed their own child.
@@ -2380,6 +2524,9 @@ struct ImGuiStyle
     ImVec2      WindowMinSize;              // Minimum window size. This is a global setting. If you want to constrain individual windows, use SetNextWindowSizeConstraints().
     ImVec2      WindowTitleAlign;           // Alignment for title bar text. Defaults to (0.0f,0.5f) for left-aligned,vertically centered.
     ImGuiDir    WindowMenuButtonPosition;   // Side of the collapsing/docking button in the title bar (None/Left/Right). Defaults to ImGuiDir_Left.
+    const char* PanelWindowIcon;           // Optional UTF-8 glyph in the current font; NULL hides the panel window toggle. Borrowed, must outlive use.
+    const char* PanelWindowSlashIcon;      // Optional UTF-8 glyph overlaid on PanelWindowIcon while detached. Borrowed, must outlive use.
+    float       PanelWindowIconScale;      // Icon size relative to the title font (0 < scale <= 1). Does not change the button hit box.
     float       ChildRounding;              // Radius of child window corners rounding. Set to 0.0f to have rectangular windows.
     float       ChildBorderSize;            // Thickness of border around child windows. Generally set to 0.0f or 1.0f. (Other values are not well tested and more CPU/GPU costly).
     float       PopupRounding;              // Radius of popup window corners rounding. (Note that tooltip windows use WindowRounding)

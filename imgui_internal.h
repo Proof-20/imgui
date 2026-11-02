@@ -289,7 +289,7 @@ extern IMGUI_API ImGuiContext* GImGui;  // Current implicit context pointer
 #define IM_F32_TO_INT8_UNBOUND(_VAL)    ((int)((_VAL) * 255.0f + ((_VAL)>=0 ? 0.5f : -0.5f)))   // Unsaturated, for display purpose
 #define IM_F32_TO_INT8_SAT(_VAL)        ((int)(ImSaturate(_VAL) * 255.0f + 0.5f))               // Saturated, always output 0..255
 #define IM_TRUNC(_VAL)                  ((float)(int)(_VAL))                                    // Positive values only! ImTrunc() is not inlined in MSVC debug builds
-#define IM_ROUND(_VAL)                  ((float)(int)((_VAL) + 0.5f))                           // Positive values only! 
+#define IM_ROUND(_VAL)                  ((float)(int)((_VAL) + 0.5f))                           // Positive values only!
 //#define IM_FLOOR IM_TRUNC             // [OBSOLETE] Renamed in 1.90.0 (Sept 2023)
 
 // Hint for branch prediction
@@ -1325,6 +1325,7 @@ enum ImGuiNextWindowDataFlags_
     ImGuiNextWindowDataFlags_HasViewport        = 1 << 11,
     ImGuiNextWindowDataFlags_HasDock            = 1 << 12,
     ImGuiNextWindowDataFlags_HasWindowClass     = 1 << 13,
+    ImGuiNextWindowDataFlags_HasReaverPanel     = 1 << 14,
 };
 
 // Storage for SetNexWindow** functions
@@ -1346,6 +1347,8 @@ struct ImGuiNextWindowData
     ImGuiChildFlags             ChildFlags;
     bool                        PosUndock;
     bool                        CollapsedVal;
+    bool                        ReaverPanelMaximizableVal;
+    ImGuiPanelContextConfig      ReaverPanelContextVal;
     ImRect                      SizeConstraintRect;
     ImGuiSizeCallback           SizeCallback;
     void*                       SizeCallbackUserData;
@@ -1355,6 +1358,7 @@ struct ImGuiNextWindowData
     ImGuiWindowClass            WindowClass;
     ImVec2                      MenuBarOffsetMinVal;    // (Always on) This is not exposed publicly, so we don't clear it and it doesn't have a corresponding flag (could we? for consistency?)
     ImGuiWindowRefreshFlags     RefreshFlagsVal;
+
 
     ImGuiNextWindowData()       { memset((void*)this, 0, sizeof(*this)); }
     inline void ClearFlags()    { HasFlags = ImGuiNextWindowDataFlags_None; }
@@ -2383,6 +2387,12 @@ typedef void (*ImGuiDemoMarkerCallback)(const char* file, int line, const char* 
 // [SECTION] ImGuiContext (main Dear ImGui context)
 //-----------------------------------------------------------------------------
 
+struct ImGuiCategoryStackData
+{
+    ImGuiWindow* Window = NULL;
+    ImGuiID TableId = 0;
+};
+
 struct ImGuiContext
 {
     bool                    Initialized;
@@ -2639,6 +2649,7 @@ struct ImGuiContext
     ImPool<ImGuiTable>              Tables;                     // Persistent table data
     ImVector<float>                 TablesLastTimeActive;       // Last used timestamp of each tables (SOA, for efficient GC)
     ImVector<ImDrawChannel>         DrawChannelsTempMergeBuffer;
+    ImVector<ImGuiCategoryStackData> ReaverCategoryStack;
 
     // Tab bars
     ImGuiTabBar*                    CurrentTabBar;
@@ -2836,6 +2847,7 @@ struct IMGUI_API ImGuiWindowTempData
     ImVec2                  MenuBarOffset;          // MenuBarOffset.x is sort of equivalent of a per-layer CursorPos.x, saved/restored as we switch to the menu bar. The only situation when MenuBarOffset.y is > 0 if when (SafeAreaPadding.y > FramePadding.y), often used on TVs.
     ImGuiMenuColumns        MenuColumns;            // Simplified columns storage for menu items measurement
     int                     TreeDepth;              // Current tree depth.
+    int                     ReaverRowIndex;         // Visible CreateRow parity, reset for each window frame.
     ImU32                   TreeHasStackDataDepthMask;      // Store whether given depth has ImGuiTreeNodeStackData data. Could be turned into a ImU64 if necessary.
     ImU32                   TreeRecordsClippedNodesY2Mask;  // Store whether we should keep recording Y2. Cleared when passing clip max. Equivalent TreeHasStackDataDepthMask value should always be set.
     ImVector<ImGuiWindow*>  ChildWindows;
@@ -2907,6 +2919,16 @@ struct IMGUI_API ImGuiWindow
     bool                    WriteAccessed;                      // Set to true when any widget access the current window
     bool                    Collapsed;                          // Set when collapsing window to become only title-bar
     bool                    WantCollapseToggle;
+    bool                    ReaverPanelEnabled;
+    bool                    ReaverPanelMaximizable;
+    bool                    ReaverPanelMaximized;
+    bool                    ReaverPanelWantMaximizeToggle;
+    bool                    ReaverPanelRestoreCollapsed;
+    ImVec2                  ReaverPanelRestorePos;
+    ImVec2                  ReaverPanelRestoreSize;
+    ImGuiPanelContextConfig ReaverPanelContext;
+    ImGuiPanelAction         ReaverPanelAction;
+    const char*             ReaverPanelWindowTooltip;
     bool                    SkipItems;                          // Set when items can safely be all clipped (e.g. window not visible or collapsed)
     bool                    SkipRefresh;                        // [EXPERIMENTAL] Reuse previous frame drawn contents, Begin() returns false.
     bool                    Appearing;                          // Set during the frame where the window is appearing (or re-appearing)

@@ -1500,6 +1500,9 @@ ImGuiStyle::ImGuiStyle()
     WindowMinSize               = ImVec2(32,32);    // Minimum window size
     WindowTitleAlign            = ImVec2(0.0f,0.5f);// Alignment for title bar text
     WindowMenuButtonPosition    = ImGuiDir_Left;    // Position of the collapsing/docking button in the title bar (left/right). Defaults to ImGuiDir_Left.
+    PanelWindowIcon             = NULL;
+    PanelWindowSlashIcon        = NULL;
+    PanelWindowIconScale        = 0.75f;
     ChildRounding               = 0.0f;             // Radius of child window corners rounding. Set to 0.0f to have rectangular child windows
     ChildBorderSize             = 1.0f;             // Thickness of border around child windows. Generally set to 0.0f or 1.0f. Other values not well tested.
     PopupRounding               = 0.0f;             // Radius of popup window corners rounding. Set to 0.0f to have rectangular child windows
@@ -3344,8 +3347,7 @@ void ImGuiListClipper::Begin(int items_count, float items_height)
     IMGUI_DEBUG_LOG_CLIPPER("Clipper: Begin(%d,%.2f) in '%s'\n", items_count, items_height, window->Name);
 
     if (ImGuiTable* table = g.CurrentTable)
-        if (table->IsInsideRow)
-            ImGui::TableEndRow(table);
+        if (table->IsInsideRow) ImGui::TableEndRow(table);
 
     StartPosY = window->DC.CursorPos.y;
     ItemsHeight = items_height;
@@ -5151,7 +5153,7 @@ void ImGui::SetLastItemData(ImGuiID item_id, ImGuiItemFlags item_flags, ImGuiIte
 static void ImGui::SetLastItemDataForWindow(ImGuiWindow* window, const ImRect& rect)
 {
     ImGuiContext& g = *GImGui;
-    if (window->DockIsActive)
+    if (window->DockIsActive && !window->ReaverPanelEnabled)
         SetLastItemData(window->MoveId, g.CurrentItemFlags, window->DC.DockTabItemStatusFlags, window->DC.DockTabItemRect);
     else
         SetLastItemData(window->MoveId, g.CurrentItemFlags, window->DC.WindowItemStatusFlags, rect);
@@ -6220,6 +6222,29 @@ static void ImGui::RenderDimmedBackgrounds()
     }
 }
 
+// Keep the existing display order stable inside each layer and native viewport.
+// Child windows are regrouped by the normal EndFrame sort immediately afterward.
+static void ReaverPanelUpdateDisplayOrder()
+{
+    ImGuiContext& g = *GImGui;
+    for (int index = 0; index < g.Windows.Size; ++index)
+    {
+        ImGuiWindow* panel = g.Windows[index];
+        if (!panel->Active || panel->Hidden || panel->RootWindow != panel || !panel->ReaverPanelEnabled || !panel->ReaverPanelMaximized)
+            continue;
+        for (int behind = 0; behind < index; ++behind)
+        {
+            ImGuiWindow* other = g.Windows[behind];
+            if (!other->Active || other->Hidden || other->IsFallbackWindow || other->RootWindow != other || other->Viewport != panel->Viewport)
+                continue;
+            if (other->ReaverPanelEnabled && other->ReaverPanelMaximized)
+                continue;
+            ImGui::BringWindowToDisplayBehind(panel, other);
+            break;
+        }
+    }
+}
+
 // This is normally called by Render(). You may want to call it directly if you want to avoid calling Render() but the gain will be very minimal.
 void ImGui::EndFrame()
 {
@@ -6300,6 +6325,8 @@ void ImGui::EndFrame()
 
     // Update user-facing viewport list (g.Viewports -> g.PlatformIO.Viewports after filtering out some)
     UpdateViewportsEndFrame();
+
+    ReaverPanelUpdateDisplayOrder();
 
     // Sort the window list so that all child windows are after their parent
     // We cannot do that on FocusWindow() because children may not exist yet
@@ -6441,6 +6468,15 @@ ImVec2 ImGui::CalcTextSize(const char* text, const char* text_end, bool hide_tex
 //   with SetWindowPos() and not SetNextWindowPos() will have that rectangle lagging by a frame at the time FindHoveredWindow() is
 //   called, aka before the next Begin(). Moving window isn't affected.
 // - The 'find_first_and_in_any_viewport = true' mode is only used by TestEngine. It is simpler to maintain here.
+static ImGuiDockNode* ReaverPanelGetDockspace(const ImGuiPanelContextConfig& context)
+{
+    if (context.detached || context.dockspace_id == 0)
+        return NULL;
+
+    ImGuiDockNode* node = ImGui::DockBuilderGetNode(context.dockspace_id);
+    return node != NULL && node->IsDockSpace() ? node : NULL;
+}
+
 void ImGui::FindHoveredWindowEx(const ImVec2& pos, bool find_first_and_in_any_viewport, ImGuiWindow** out_hovered_window, ImGuiWindow** out_hovered_window_under_moving_window)
 {
     ImGuiContext& g = *GImGui;
@@ -6496,8 +6532,29 @@ void ImGui::FindHoveredWindowEx(const ImVec2& pos, bool find_first_and_in_any_vi
             if (hovered_window == NULL)
                 hovered_window = window;
             IM_MSVC_WARNING_SUPPRESS(28182); // [Static Analyzer] Dereferencing NULL pointer.
-            if (hovered_window_under_moving_window == NULL && (!g.MovingWindow || window->RootWindowDockTree != g.MovingWindow->RootWindowDockTree))
+            if (hovered_window_under_moving_window == NULL &&
+                (!g.MovingWindow || window->RootWindowDockTree != g.MovingWindow->RootWindowDockTree))
+            {
                 hovered_window_under_moving_window = window;
+
+                ImGuiWindow* panel = window->RootWindow;
+                const bool docking_drag = g.MovingWindow != NULL &&
+                    (g.IO.ConfigFlags & ImGuiConfigFlags_DockingEnable) != 0 &&
+                    g.IO.ConfigDockingWithShift == g.IO.KeyShift &&
+                    (g.MovingWindow->RootWindowDockTree->Flags & ImGuiWindowFlags_NoDocking) == 0;
+
+                if (docking_drag && panel->ReaverPanelEnabled && panel->ReaverPanelMaximized)
+                {
+                    ImGuiDockNode* dockspace = ReaverPanelGetDockspace(panel->ReaverPanelContext);
+                    if (dockspace != NULL && dockspace->HostWindow != NULL &&
+                        dockspace->HostWindow->Viewport == window->Viewport)
+                    {
+                        // The maximized panel covers the central area, but docking targets
+                        // belong to its Host layout.
+                        hovered_window_under_moving_window = dockspace->HostWindow;
+                    }
+                }
+            }
             if (hovered_window && hovered_window_under_moving_window)
                 break;
         }
@@ -7560,7 +7617,8 @@ void ImGui::RenderWindowDecorations(ImGuiWindow* window, const ImRect& title_bar
         // Title bar
         // (when docked, DockNode are drawing their own title bar. Individual windows however do NOT set the _NoTitleBar flag,
         // in order for their pos/size to be matching their undocking state.)
-        if (!(flags & ImGuiWindowFlags_NoTitleBar) && !window->DockIsActive)
+        if (!(flags & ImGuiWindowFlags_NoTitleBar) &&
+            (!window->DockIsActive || window->ReaverPanelEnabled))
         {
             ImU32 title_bar_col = GetColorU32(title_bar_is_highlight ? ImGuiCol_TitleBgActive : ImGuiCol_TitleBg);
             if (window->ViewportOwned)
@@ -7630,6 +7688,87 @@ void ImGui::RenderWindowDecorations(ImGuiWindow* window, const ImRect& title_bar
     window->DC.NavLayerCurrent = ImGuiNavLayer_Main;
 }
 
+static bool ReaverPanelMaximizeButton(ImGuiWindow* window, const ImVec2& pos)
+{
+    ImGuiContext& g = *GImGui;
+    const ImGuiID id = window->GetID("#REAVER_MAXIMIZE");
+
+    const ImRect bb(pos, pos + ImVec2(g.FontSize, g.FontSize));
+    const bool clipped = !ImGui::ItemAdd(bb, id);
+
+    bool hovered = false;
+    bool held = false;
+    const bool pressed = ImGui::ButtonBehavior(bb, id, &hovered, &held);
+
+    if (clipped)
+        return pressed;
+
+    ImDrawList* draw = window->DrawList;
+
+    if (hovered)
+        draw->AddRectFilled(bb.Min, bb.Max, ImGui::GetColorU32(held ? ImGuiCol_ButtonActive : ImGuiCol_ButtonHovered));
+
+    ImGui::RenderNavCursor(bb, id, ImGuiNavRenderCursorFlags_Compact);
+
+    const float inset = g.FontSize * 0.25f;
+    const ImVec2 padding(inset, inset);
+    const ImU32 color = ImGui::GetColorU32(ImGuiCol_Text);
+
+    if (window->ReaverPanelMaximized || window->DockIsActive)
+    {
+        const float offset = g.FontSize * 0.15f;
+
+        draw->AddRect(bb.Min + padding + ImVec2(offset, 0.0f), bb.Max - padding - ImVec2(0.0f, offset), color);
+        draw->AddRect(bb.Min + padding + ImVec2(0.0f, offset), bb.Max - padding - ImVec2(offset, 0.0f), color);
+    }
+    else
+    {
+        draw->AddRect(bb.Min + padding, bb.Max - padding, color);
+    }
+
+    return pressed;
+}
+
+static void ReaverPanelWindowButton(ImGuiWindow* window, const ImVec2& pos)
+{
+    ImGuiContext& g = *GImGui;
+    const auto& context = window->ReaverPanelContext;
+    const ImGuiBackendFlags required = ImGuiBackendFlags_PlatformHasViewports | ImGuiBackendFlags_RendererHasViewports;
+    const bool supported = (g.IO.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) != 0 && (g.IO.BackendFlags & required) == required;
+    const bool available = context.detached || (context.can_create_window && supported);
+    const ImGuiID id = window->GetID("#REAVER_WINDOW");
+    const ImRect bb(pos, pos + ImVec2(g.FontSize, g.FontSize));
+
+    ImGui::BeginDisabled(!available);
+    if (ImGui::ItemAdd(bb, id))
+    {
+        bool hovered = false;
+        bool held = false;
+        if (ImGui::ButtonBehavior(bb, id, &hovered, &held))
+            window->ReaverPanelAction = context.detached ? ImGuiPanelAction_ReturnToMainWindow : ImGuiPanelAction_CreateWindow;
+
+        ImDrawList* draw = window->DrawList;
+        if (hovered || context.detached)
+            draw->AddRectFilled(bb.Min, bb.Max, ImGui::GetColorU32(held || context.detached ? ImGuiCol_ButtonActive : ImGuiCol_ButtonHovered));
+
+        ImGui::RenderNavCursor(bb, id, ImGuiNavRenderCursorFlags_Compact);
+        const ImU32 color = ImGui::GetColorU32(ImGuiCol_Text);
+        IM_ASSERT(g.Style.PanelWindowIconScale > 0.0f && g.Style.PanelWindowIconScale <= 1.0f);
+        const float icon_size = g.FontSize * g.Style.PanelWindowIconScale;
+        const auto draw_icon = [&](const char* icon)
+        {
+            const ImVec2 text_size = g.Font->CalcTextSizeA(icon_size, FLT_MAX, 0.0f, icon);
+            draw->AddText(g.Font, icon_size, bb.Min + (bb.GetSize() - text_size) * 0.5f, color, icon);
+        };
+        draw_icon(g.Style.PanelWindowIcon);
+        if (context.detached && g.Style.PanelWindowSlashIcon != NULL) draw_icon(g.Style.PanelWindowSlashIcon);
+
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            window->ReaverPanelWindowTooltip = available ? (context.detached ? "Return to Main Window" : "Detach Window") : (supported ? "Window transfer is not enabled." : "Native windows are unavailable.");
+    }
+    ImGui::EndDisabled();
+}
+
 // When inside a dock node, this is handled in DockNodeCalcTabBarLayout() instead.
 // Render title text, collapse button, close button
 void ImGui::RenderWindowTitleBarContents(ImGuiWindow* window, const ImRect& title_bar_rect, const char* name, bool* p_open)
@@ -7639,7 +7778,12 @@ void ImGui::RenderWindowTitleBarContents(ImGuiWindow* window, const ImRect& titl
     ImGuiWindowFlags flags = window->Flags;
 
     const bool has_close_button = (p_open != NULL);
-    const bool has_collapse_button = !(flags & ImGuiWindowFlags_NoCollapse) && (style.WindowMenuButtonPosition != ImGuiDir_None);
+    const bool has_maximize_button = window->ReaverPanelEnabled && window->ReaverPanelMaximizable;
+    const bool has_window_button = window->ReaverPanelEnabled && window->ReaverPanelContext.enabled && style.PanelWindowIcon != NULL && style.PanelWindowIcon[0] != '\0';
+    const bool has_collapse_button =
+        !(flags & ImGuiWindowFlags_NoCollapse) &&
+        !(window->ReaverPanelEnabled && window->DockIsActive) &&
+        style.WindowMenuButtonPosition != ImGuiDir_None;
 
     // Close & Collapse button are on the Menu NavLayer and don't default focus (unless there's nothing else on that layer)
     // FIXME-NAV: Might want (or not?) to set the equivalent of ImGuiButtonFlags_NoNavFocus so that mouse clicks on standard title bar items don't necessarily set nav/keyboard ref?
@@ -7683,6 +7827,27 @@ void ImGui::RenderWindowTitleBarContents(ImGuiWindow* window, const ImRect& titl
         if (CloseButton(window->GetID("#CLOSE"), close_button_pos))
             *p_open = false;
         g.CurrentItemFlags = backup_item_flags;
+    }
+
+    if (has_maximize_button)
+    {
+        ImVec2 maximize_button_pos = ImVec2(title_bar_rect.Max.x - pad_r - button_sz, title_bar_rect.Min.y + style.FramePadding.y);
+        pad_r += button_sz + style.ItemInnerSpacing.x;
+
+        if (ReaverPanelMaximizeButton(window, maximize_button_pos))
+        {
+            if (window->DockIsActive)
+                window->ReaverPanelAction = ImGuiPanelAction_ReturnToFloating;
+            else
+                window->ReaverPanelWantMaximizeToggle = true;
+        }
+    }
+
+    if (has_window_button)
+    {
+        const ImVec2 window_button_pos(title_bar_rect.Max.x - pad_r - button_sz, title_bar_rect.Min.y + style.FramePadding.y);
+        pad_r += button_sz + style.ItemInnerSpacing.x;
+        ReaverPanelWindowButton(window, window_button_pos);
     }
 
     window->DC.NavLayerCurrent = ImGuiNavLayer_Main;
@@ -7783,6 +7948,271 @@ static void SetWindowActiveForSkipRefresh(ImGuiWindow* window)
         }
 }
 
+bool ImGui::BeginPanel(const char* name, bool* p_open, const ImGuiPanelConfig& config, ImGuiWindowFlags flags)
+{
+    ImGuiContext& g = *GImGui;
+
+    IM_ASSERT(g.WithinFrameScope);
+    IM_ASSERT(name != NULL && name[0] != '\0');
+    IM_ASSERT((flags & (
+        ImGuiWindowFlags_ChildWindow |
+        ImGuiWindowFlags_Popup |
+        ImGuiWindowFlags_Tooltip |
+        ImGuiWindowFlags_NoTitleBar)) == 0);
+
+    ImGuiWindow* window = FindWindowByName(name);
+    IM_ASSERT(window == NULL || window->LastFrameActive != g.FrameCount);
+
+    ImGuiViewport* host = GetMainViewport();
+    ImVec2 host_pos = host->WorkPos;
+    ImVec2 host_size = host->WorkSize;
+
+    const ImGuiBackendFlags required =
+        ImGuiBackendFlags_PlatformHasViewports | ImGuiBackendFlags_RendererHasViewports;
+
+    const bool supported =
+        (g.IO.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) != 0 && (g.IO.BackendFlags & required) == required;
+
+    const bool detached =
+        config.context.detached && supported;
+
+    ImGuiWindowClass window_class;
+
+    if (g.NextWindowData.HasFlags & ImGuiNextWindowDataFlags_HasWindowClass)
+        window_class = g.NextWindowData.WindowClass;
+    else
+        if (window != NULL) window_class = window->WindowClass;
+
+    if (detached)
+    {
+        window_class.ParentViewportId = 0;
+        window_class.ViewportFlagsOverrideSet |= ImGuiViewportFlags_NoAutoMerge;
+        window_class.ViewportFlagsOverrideClear &= ~ImGuiViewportFlags_NoAutoMerge;
+
+        // Let ImGui create an owned viewport even while overlapping the main window.
+        g.NextWindowData.HasFlags &= ~ImGuiNextWindowDataFlags_HasViewport;
+
+        if (window != NULL && window->Viewport != NULL)
+        {
+            const int monitor = window->Viewport->PlatformMonitor;
+            if (monitor >= 0 && monitor < g.PlatformIO.Monitors.Size)
+            {
+                host_pos = g.PlatformIO.Monitors[monitor].WorkPos;
+                host_size = g.PlatformIO.Monitors[monitor].WorkSize;
+            }
+        }
+    }
+    else
+    {
+        window_class.ViewportFlagsOverrideSet &= ~ImGuiViewportFlags_NoAutoMerge;
+        window_class.ViewportFlagsOverrideClear |= ImGuiViewportFlags_NoAutoMerge;
+        SetNextWindowViewport(host->ID);
+    }
+
+    // Attached panels keep their own title bar and occupy separate layout regions.
+    window_class.DockNodeFlagsOverrideSet |=
+        ImGuiDockNodeFlags_NoTabBar | ImGuiDockNodeFlags_NoDockingOverMe;
+
+    SetNextWindowClass(&window_class);
+
+    if (detached)
+    {
+        SetNextWindowDockID(0, ImGuiCond_Always);
+        flags |= ImGuiWindowFlags_NoDocking;
+    }
+
+    const bool docking_enabled = (g.IO.ConfigFlags & ImGuiConfigFlags_DockingEnable) != 0;
+    const bool has_dock_request = (g.NextWindowData.HasFlags & ImGuiNextWindowDataFlags_HasDock) != 0;
+    const ImGuiID dock_id = has_dock_request
+        ? g.NextWindowData.DockId : (window != NULL ? window->DockId : 0);
+
+    const bool docked = docking_enabled && !detached && dock_id != 0;
+
+    if (docked && window != NULL)
+    {
+        // Dock-node geometry must not inherit floating maximize overrides.
+        window->ReaverPanelMaximized = false;
+        window->ReaverPanelWantMaximizeToggle = false;
+    }
+
+    if (window != NULL && window->ReaverPanelContext.detached != detached)
+    {
+        window->ReaverPanelMaximized = false;
+        window->ReaverPanelWantMaximizeToggle = false;
+    }
+
+    const bool has_work_area = host_size.x > 0.0f && host_size.y > 0.0f;
+
+    const auto& size = config.size;
+    const auto& layout = config.layout;
+    const auto& behavior = config.behavior;
+
+    IM_ASSERT(size.width >= 0.0f && size.width <= FLT_MAX);
+    IM_ASSERT(size.height >= 0.0f && size.height <= FLT_MAX);
+    IM_ASSERT(size.min_width >= 0.0f && size.min_height >= 0.0f);
+
+    const ImVec2 minimum_size = ImMax(g.Style.WindowMinSize, ImVec2(size.min_width, size.min_height));
+    const ImVec2 maximum_size(size.max_width, size.max_height);
+
+    IM_ASSERT(maximum_size.x >= minimum_size.x && maximum_size.x <= FLT_MAX);
+    IM_ASSERT(maximum_size.y >= minimum_size.y && maximum_size.y <= FLT_MAX);
+
+    const float layout_values[] = {
+        layout.padding_x,
+        layout.padding_y,
+        layout.row_spacing,
+        layout.column_spacing,
+        layout.border_radius,
+    };
+
+    for (float value : layout_values)
+    {
+        IM_ASSERT(value >= -FLT_MAX && value <= FLT_MAX);
+        IM_UNUSED(value);
+    }
+
+    const bool has_initial_x = layout.initial_x != FLT_MAX;
+    const bool has_initial_y = layout.initial_y != FLT_MAX;
+    IM_ASSERT(has_initial_x == has_initial_y);
+
+    if (!docked && window == NULL && has_initial_x && has_initial_y && has_work_area)
+    {
+        IM_ASSERT(layout.initial_x >= -FLT_MAX && layout.initial_x < FLT_MAX);
+        IM_ASSERT(layout.initial_y >= -FLT_MAX && layout.initial_y < FLT_MAX);
+
+        SetNextWindowPos(host_pos + ImVec2(layout.initial_x, layout.initial_y), ImGuiCond_FirstUseEver);
+    }
+
+    if (!docked && window == NULL && (size.width > 0.0f || size.height > 0.0f))
+        SetNextWindowSize(ImVec2(size.width, size.height), ImGuiCond_FirstUseEver);
+
+    if (!docked &&
+        (size.min_width > 0.0f || size.min_height > 0.0f || size.max_width < FLT_MAX || size.max_height < FLT_MAX))
+        SetNextWindowSizeConstraints(minimum_size, maximum_size);
+
+    const ImVec2 padding(
+        layout.padding_x >= 0.0f ? layout.padding_x : g.Style.WindowPadding.x,
+        layout.padding_y >= 0.0f ? layout.padding_y : g.Style.WindowPadding.y);
+
+    const ImVec2 spacing(
+        layout.column_spacing >= 0.0f ? layout.column_spacing : g.Style.ItemSpacing.x,
+        layout.row_spacing >= 0.0f ? layout.row_spacing : g.Style.ItemSpacing.y);
+
+    PushStyleVar(ImGuiStyleVar_WindowPadding, padding);
+    PushStyleVar(ImGuiStyleVar_ItemSpacing, spacing);
+    PushStyleVar(ImGuiStyleVar_WindowRounding, window != NULL && window->ReaverPanelMaximized ? 0.0f :
+        (layout.border_radius >= 0.0f ? layout.border_radius : g.Style.WindowRounding));
+
+    flags |= behavior.resizable ? 0 : ImGuiWindowFlags_NoResize;
+    flags |= behavior.movable ? 0 : ImGuiWindowFlags_NoMove;
+    flags |= behavior.collapsible ? 0 : ImGuiWindowFlags_NoCollapse;
+
+    if (!docked && window != NULL && has_work_area)
+    {
+        if (window->ReaverPanelWantMaximizeToggle || (!config.behavior.maximizable && window->ReaverPanelMaximized))
+        {
+            window->ReaverPanelWantMaximizeToggle = false;
+
+            if (!window->ReaverPanelMaximized && config.behavior.maximizable)
+            {
+                window->ReaverPanelRestorePos = window->Pos;
+                window->ReaverPanelRestoreSize = window->SizeFull;
+                window->ReaverPanelRestoreCollapsed = window->Collapsed;
+                window->ReaverPanelMaximized = true;
+                BringWindowToDisplayFront(window);
+            }
+            else if (window->ReaverPanelMaximized)
+            {
+                const ImVec2 minimum_size = ImMin(g.Style.WindowMinSize, host_size);
+                const ImVec2 restored_size = ImClamp(window->ReaverPanelRestoreSize, minimum_size, host_size);
+                const ImVec2 restored_pos = ImClamp(window->ReaverPanelRestorePos, host_pos, host_pos + host_size - restored_size);
+
+                SetNextWindowPos(restored_pos, ImGuiCond_Always);
+                SetNextWindowSize(restored_size, ImGuiCond_Always);
+                SetNextWindowCollapsed(window->ReaverPanelRestoreCollapsed, ImGuiCond_Always);
+
+                window->ReaverPanelMaximized = false;
+                BringWindowToDisplayFront(window);
+            }
+        }
+
+        if (window->ReaverPanelMaximized)
+        {
+            ImVec2 maximized_pos = host_pos;
+            ImVec2 maximized_size = host_size;
+
+            if (ImGuiDockNode* dockspace = ReaverPanelGetDockspace(config.context))
+            {
+                if (ImGuiDockNode* central = DockBuilderGetCentralNode(dockspace->ID))
+                {
+                    maximized_pos = central->Pos;
+                    maximized_size = ImMax(central->Size, ImVec2(1.0f, 1.0f));
+                }
+            }
+
+            flags &= ~ImGuiWindowFlags_AlwaysAutoResize;
+
+            // Floating constraints must not override the Host layout.
+            g.NextWindowData.HasFlags &= ~ImGuiNextWindowDataFlags_HasSizeConstraint;
+
+            SetNextWindowPos(maximized_pos, ImGuiCond_Always);
+            SetNextWindowSize(maximized_size, ImGuiCond_Always);
+            SetNextWindowCollapsed(false, ImGuiCond_Always);
+        }
+    }
+
+    if (!docked && window != NULL && window->ReaverPanelMaximized)
+    {
+        flags |= ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus |
+            ImGuiWindowFlags_NoDocking;
+
+        if (window->LastFrameActive < g.FrameCount - 1)
+            BringWindowToDisplayFront(window);
+    }
+
+    g.NextWindowData.HasFlags |= ImGuiNextWindowDataFlags_HasReaverPanel;
+    g.NextWindowData.ReaverPanelMaximizableVal = config.behavior.maximizable || docked;
+    g.NextWindowData.ReaverPanelContextVal = config.context;
+    g.NextWindowData.ReaverPanelContextVal.detached = detached;
+
+    return Begin(name, config.behavior.closable ? p_open : NULL, flags);
+}
+
+bool ImGui::ActivatePanel(const char* name)
+{
+    ImGuiContext& g = *GImGui;
+    IM_ASSERT(g.WithinFrameScope);
+    if (name == NULL || name[0] == '\0') return false;
+    ImGuiWindow* window = FindWindowByName(name);
+    if (window == NULL || !window->ReaverPanelEnabled) return false;
+    if ((!window->Active && !window->WasActive) || FindBlockingModal(window) != NULL) return false;
+    FocusWindow(window, ImGuiFocusRequestFlags_UnlessBelowModal);
+    if (g.NavWindow == NULL || g.NavWindow->RootWindow != window->RootWindow) return false;
+    if (window->DockNode != NULL && window->DockNode->TabBar != NULL)
+        window->DockNode->TabBar->NextSelectedTabId = window->TabId;
+    SetWindowCollapsed(window, false, ImGuiCond_Always);
+    BringWindowToDisplayFront(window);
+    return true;
+}
+
+ImGuiPanelAction ImGui::EndPanel()
+{
+    ImGuiContext& g = *GImGui;
+    ImGuiWindow* window = g.CurrentWindow;
+
+    IM_ASSERT_USER_ERROR_RETV(window != NULL && window->ReaverPanelEnabled,
+       ImGuiPanelAction_None, "EndPanel() requires a matching BeginPanel().");
+
+    const ImGuiPanelAction action = window->ReaverPanelAction;
+    window->ReaverPanelAction = ImGuiPanelAction_None;
+    if (window->ReaverPanelWindowTooltip != NULL) SetTooltip("%s", window->ReaverPanelWindowTooltip);
+
+    End();
+    PopStyleVar(3);
+    return action;
+}
+
 // Push a new Dear ImGui window to add widgets to.
 // - A default window called "Debug" is automatically stacked at the beginning of every frame so you can use widgets without explicitly calling a Begin/End pair.
 // - Begin/End can be called multiple times during the frame with the same window name to append content.
@@ -7814,6 +8244,7 @@ bool ImGui::Begin(const char* name, bool* p_open, ImGuiWindowFlags flags)
 
     const int current_frame = g.FrameCount;
     const bool first_begin_of_the_frame = (window->LastFrameActive != current_frame);
+
     window->IsFallbackWindow = (g.CurrentWindowStack.Size == 0 && g.WithinFrameScopeWithImplicitWindow);
 
     // Update the Appearing flag (note: the BeginDocked() path may also set this to true later)
@@ -7835,6 +8266,11 @@ bool ImGui::Begin(const char* name, bool* p_open, ImGuiWindowFlags flags)
             SetWindowConditionAllowFlags(window, ImGuiCond_Appearing, true);
         window->FlagsPreviousFrame = window->Flags;
         window->Flags = (ImGuiWindowFlags)flags;
+        window->ReaverPanelEnabled = (g.NextWindowData.HasFlags & ImGuiNextWindowDataFlags_HasReaverPanel) != 0;
+        window->ReaverPanelMaximizable = window->ReaverPanelEnabled && g.NextWindowData.ReaverPanelMaximizableVal;
+        window->ReaverPanelContext = window->ReaverPanelEnabled ? g.NextWindowData.ReaverPanelContextVal : ImGuiPanelContextConfig{};
+        window->ReaverPanelAction = ImGuiPanelAction_None;
+        window->ReaverPanelWindowTooltip = NULL;
         window->ChildFlags = (g.NextWindowData.HasFlags & ImGuiNextWindowDataFlags_HasChildFlags) ? g.NextWindowData.ChildFlags : 0;
         window->LastFrameActive = current_frame;
         window->LastTimeActive = (float)g.Time;
@@ -8404,7 +8840,7 @@ bool ImGui::Begin(const char* name, bool* p_open, ImGuiWindowFlags flags)
         const ImRect outer_rect = window->Rect();
         const ImRect title_bar_rect = window->TitleBarRect();
         window->OuterRectClipped = outer_rect;
-        if (window->DockIsActive)
+        if (window->DockIsActive && !window->ReaverPanelEnabled)
             window->OuterRectClipped.Min.y += window->TitleBarHeight;
         window->OuterRectClipped.ClipWith(host_rect);
 
@@ -8545,6 +8981,7 @@ bool ImGui::Begin(const char* name, bool* p_open, ImGuiWindowFlags flags)
         window->DC.MenuBarAppending = false;
         window->DC.MenuColumns.Update(style.ItemSpacing.x, window_just_activated_by_user);
         window->DC.TreeDepth = 0;
+        window->DC.ReaverRowIndex = 0;
         window->DC.TreeHasStackDataDepthMask = window->DC.TreeRecordsClippedNodesY2Mask = 0x00;
         window->DC.ChildWindows.resize(0);
         window->DC.StateStorage = &window->StateStorage;
@@ -8600,7 +9037,8 @@ bool ImGui::Begin(const char* name, bool* p_open, ImGuiWindowFlags flags)
                 LogToClipboard(0);
 
         // Title bar
-        if (!(flags & ImGuiWindowFlags_NoTitleBar) && !window->DockIsActive)
+        if (!(flags & ImGuiWindowFlags_NoTitleBar) &&
+            (!window->DockIsActive || window->ReaverPanelEnabled))
             RenderWindowTitleBarContents(window, ImRect(title_bar_rect.Min.x + window->WindowBorderSize, title_bar_rect.Min.y, title_bar_rect.Max.x - window->WindowBorderSize, title_bar_rect.Max.y), name, p_open);
         else if (!(flags & ImGuiWindowFlags_NoTitleBar) && window->DockIsActive)
             LogText("%.*s\n", (int)(FindRenderedTextEnd(window->Name) - window->Name), window->Name);
@@ -21260,10 +21698,10 @@ void ImGui::BeginDocked(ImGuiWindow* window, bool* p_open)
     IM_ASSERT((window->Flags & ImGuiWindowFlags_ChildWindow) == 0);
     window->Flags |= ImGuiWindowFlags_ChildWindow | ImGuiWindowFlags_NoResize;
     window->ChildFlags |= ImGuiChildFlags_AlwaysUseWindowPadding;
-    if (node->IsHiddenTabBar() || node->IsNoTabBar())
+    if ((node->IsHiddenTabBar() || node->IsNoTabBar()) && !window->ReaverPanelEnabled)
         window->Flags |= ImGuiWindowFlags_NoTitleBar;
     else
-        window->Flags &= ~ImGuiWindowFlags_NoTitleBar;      // Clear the NoTitleBar flag in case the user set it: confusingly enough we need a title bar height so we are correctly offset, but it won't be displayed!
+        window->Flags &= ~ImGuiWindowFlags_NoTitleBar;
 
     // Save new dock order only if the window has been visible once already
     // This allows multiple windows to be created in the same frame and have their respective dock orders preserved.
